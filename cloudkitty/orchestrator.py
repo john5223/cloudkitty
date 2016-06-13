@@ -287,6 +287,7 @@ class Orchestrator(object):
                         if not self._check_state(tenant):
                             self._tenants.remove(tenant)
                         else:
+                            LOG.debug("Fetching tenant {}".format(tenant))
                             worker = Worker(self.collector,
                                             self.storage,
                                             tenant)

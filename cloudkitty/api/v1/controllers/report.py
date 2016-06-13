@@ -25,6 +25,9 @@ import wsmeext.pecan as wsme_pecan
 
 from cloudkitty.common import policy
 
+from oslo_log import log as logging
+LOG = logging.getLogger(__name__)
+
 
 class ReportController(rest.RestController):
     """REST Controller managing the reporting.
@@ -32,8 +35,12 @@ class ReportController(rest.RestController):
     """
 
     _custom_actions = {
+        'tenants': ['GET'],
         'total': ['GET'],
-        'tenants': ['GET']
+        'usage': ['GET'],
+        'project_usage': ['GET'],
+        'instance_usage': ['GET'],
+        'bandwidth_hourly_usage': ['GET'],
     }
 
     @wsme_pecan.wsexpose([wtypes.text],
@@ -62,5 +69,73 @@ class ReportController(rest.RestController):
         # FIXME(sheeprine): We should filter on user id.
         # Use keystone token information by default but make it overridable and
         # enforce it by policy engine
+        tenant_id = tenant_id or pecan.request.headers.get('X-Tenant-Id')
         total = storage.get_total(begin, end, tenant_id, service)
         return total if total else decimal.Decimal('0')
+
+    @wsme_pecan.wsexpose(wtypes.text,
+                         datetime.datetime,
+                         datetime.datetime,
+                         wtypes.text,
+                         wtypes.text)
+    def usage(self, begin=None, end=None, tenant_id=None, service=None):
+        """Return the qty and amount to pay for each project given period.
+
+        """
+        policy.enforce(pecan.request.context, 'report:get_project_usage', {})
+        storage = pecan.request.storage_backend
+        # FIXME(sheeprine): We should filter on user id.
+        # Use keystone token information by default but make it overridable and
+        # enforce it by policy engine
+        # TODO(john): add --all-tenants
+        tenant_id = tenant_id or pecan.request.headers.get('X-Tenant-Id')
+        usage = storage.get_project_usage(begin, end, tenant_id, service)
+        return usage if usage else []
+
+    @wsme_pecan.wsexpose(wtypes.text,
+                         datetime.datetime,
+                         datetime.datetime,
+                         wtypes.text,
+                         wtypes.text)
+    def project_usage(self, begin=None, end=None, tenant_id=None, service=None):
+        """Return the qty and amount to pay for each project given period.
+
+        """
+        policy.enforce(pecan.request.context, 'report:get_project_usage', {})
+        storage = pecan.request.storage_backend
+        # TODO(john): add --all-tenants
+        tenant_id = tenant_id or pecan.request.headers.get('X-Tenant-Id')
+        usage = storage.get_project_usage(begin, end, tenant_id, service)
+        return usage if usage else []
+
+    @wsme_pecan.wsexpose(wtypes.text,
+                         datetime.datetime,
+                         datetime.datetime,
+                         wtypes.text,
+                         wtypes.text)
+    def instance_usage(self, begin=None, end=None,
+                       tenant_id=None, service=None):
+        """Return the qty and amount to pay for each project given period.
+
+        """
+        policy.enforce(pecan.request.context, 'report:get_instance_usage', {})
+        storage = pecan.request.storage_backend
+        # TODO(john): add --all-tenants
+        tenant_id = tenant_id or pecan.request.headers.get('X-Tenant-Id')
+        usage = storage.get_instance_usage(begin, end, tenant_id, service)
+        return usage if usage else []
+
+    @wsme_pecan.wsexpose(wtypes.text,
+                         datetime.datetime,
+                         datetime.datetime,
+                         wtypes.text,
+                         wtypes.text)
+    def bandwidth_hourly_usage(self, begin=None, end=None,
+                               tenant_id=None, service=None):
+        policy.enforce(pecan.request.context,
+                       'report:get_bandwidth_hourly_usage', {})
+        storage = pecan.request.storage_backend
+        tenant_id = tenant_id or pecan.request.headers.get('X-Tenant-Id')
+        usage = storage.get_bandwidth_hourly_usage(begin, end,
+                                                   tenant_id, service)
+        return usage if usage else []

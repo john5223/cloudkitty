@@ -15,17 +15,22 @@
 #
 # @author: Stéphane Albert
 #
-import decimal
+from decimal import Decimal
 import json
 
 from oslo_db.sqlalchemy import utils
 import sqlalchemy
+from sqlalchemy import Text
+from sqlalchemy.dialects.postgresql import JSON
 
 from cloudkitty import db
 from cloudkitty import storage
 from cloudkitty.storage.sqlalchemy import migration
 from cloudkitty.storage.sqlalchemy import models
 from cloudkitty import utils as ck_utils
+
+from oslo_log import log as logging
+LOG = logging.getLogger(__name__)
 
 
 class SQLAlchemyStorage(storage.BaseStorage):
@@ -150,7 +155,7 @@ class SQLAlchemyStorage(storage.BaseStorage):
         rating_dict = frame.get('rating', {})
         rate = rating_dict.get('price')
         if not rate:
-            rate = decimal.Decimal(0)
+            rate = Decimal(0)
         desc = json.dumps(frame['desc'])
         self.add_time_frame(begin=self.usage_start_dt.get(tenant_id),
                             end=self.usage_end_dt.get(tenant_id),
@@ -175,3 +180,183 @@ class SQLAlchemyStorage(storage.BaseStorage):
         """
         frame = self.frame_model(**kwargs)
         self._session[kwargs.get('tenant_id')].add(frame)
+
+    def get_project_usage(self, begin=None, end=None,
+                          tenant_id=None, service=None):
+        if not begin:
+            begin = ck_utils.get_month_start()
+        if not end:
+            end = ck_utils.get_next_month()
+
+        fm = self.frame_model
+        session = db.get_session()
+        instance_id = sqlalchemy.func.array_agg(
+            sqlalchemy.case(
+                [(fm.res_type == 'image',
+                  fm.desc.cast(JSON)[('properties.instance_uuid')].astext)
+                 ],
+                else_=fm.desc.cast(JSON)[('instance_id')].astext
+            ).distinct())
+        instance_name = sqlalchemy.func.array_agg(
+            sqlalchemy.case(
+                [(fm.res_type == 'compute',
+                  fm.desc.cast(JSON)[('name')].astext),
+                 (fm.res_type.in_(['network.bw.in', 'network.bw.out']),
+                  fm.desc.cast(JSON)[("display_name")].astext)
+                 ],
+                else_=fm.desc.cast(JSON)[('instance_name')].astext
+            ).distinct())
+        q = session.query(
+            self.frame_model.tenant_id.label('tenant_id'),
+            self.frame_model.res_type.label('res_type'),
+            instance_id.label('instance_id'),
+            instance_name.label('instance_name'),
+            fm.unit.label('unit'),
+            sqlalchemy.func.sum(fm.qty).label('qty'),
+            sqlalchemy.func.sum(fm.rate).label('rate'))
+        if tenant_id:
+            q = q.filter(
+                self.frame_model.tenant_id == tenant_id)
+        if service:
+            q = q.filter(
+                self.frame_model.res_type == service)
+        q = q.filter(
+            self.frame_model.begin >= begin,
+            self.frame_model.end <= end)
+        q = q.filter(self.frame_model.res_type != '_NO_DATA_')
+        q = q.group_by(fm.tenant_id, fm.res_type, fm.unit)
+        result = [x._asdict() for x in q.all()]
+        usage = {}
+        for r in result:
+            tenant_id = r['tenant_id']
+            resource_type = r['res_type']
+            usage.setdefault(tenant_id, {})
+            tenant_usage = usage[tenant_id]
+            tenant_usage.setdefault('total', {'rate': Decimal(0)})
+            tenant_usage['total']['rate'] += Decimal(r['rate'])
+            tenant_usage.setdefault(resource_type, list())
+            tenant_usage[resource_type].append({
+                'qty': r['qty'],
+                'unit': r['unit'],
+                'rate': r['rate']
+            })
+        return usage
+
+    def get_instance_usage(self, begin=None, end=None,
+                           tenant_id=None, service=None):
+        if not begin:
+            begin = ck_utils.get_month_start()
+        if not end:
+            end = ck_utils.get_next_month()
+
+        fm = self.frame_model
+        session = db.get_session()
+        instance_id = sqlalchemy.case(
+            [(fm.res_type == 'image',
+              fm.desc.cast(JSON)[('properties.instance_uuid')].astext)
+             ],
+            else_=fm.desc.cast(JSON)[('instance_id')].astext
+        )
+        instance_name = sqlalchemy.func.array_agg(
+            sqlalchemy.case(
+                [(fm.res_type == 'compute',
+                  fm.desc.cast(JSON)[('name')].astext),
+                 (fm.res_type.in_(['network.bw.in', 'network.bw.out']),
+                  fm.desc.cast(JSON)[("display_name")].astext),
+                 ],
+                else_=fm.desc.cast(JSON)[('instance_name')].astext
+            ).distinct())
+        q = session.query(
+            self.frame_model.tenant_id.label('tenant_id'),
+            self.frame_model.res_type.label('res_type'),
+            self.frame_model.unit.label('unit'),
+            instance_id.label('instance_id'),
+            instance_name.label('instance_name'),
+            sqlalchemy.func.sum(self.frame_model.qty).label('qty'),
+            sqlalchemy.func.sum(self.frame_model.rate).label('rate'))
+        if tenant_id:
+            q = q.filter(
+                self.frame_model.tenant_id == tenant_id)
+        if service:
+            q = q.filter(
+                self.frame_model.res_type == service)
+        q = q.filter(
+            self.frame_model.begin >= begin,
+            self.frame_model.end <= end)
+        q = q.filter(self.frame_model.res_type != '_NO_DATA_')
+        q = q.group_by(
+            self.frame_model.tenant_id,
+            self.frame_model.res_type,
+            self.frame_model.unit,
+            'instance_id')
+        result = [x._asdict() for x in q.all()]
+        usage = {}
+        for r in result:
+            tenant_id = r['tenant_id']
+            usage.setdefault(tenant_id, {})
+            tenant_usage = usage[tenant_id]
+            tenant_usage.setdefault(r['instance_id'],
+                                    {'instance_name': r['instance_name'],
+                                     'instance_id': r['instance_id']})
+            instance_usage = tenant_usage[r['instance_id']]
+            instance_usage.setdefault(r['res_type'], list())
+            instance_usage[r['res_type']].append({
+                'qty': r['qty'],
+                'unit': r['unit'],
+                'rate': r['rate']
+            })
+        return usage
+
+    def get_bandwidth_hourly_usage(self, begin=None, end=None,
+                                   tenant_id=None, service=None):
+        if not begin:
+            begin = ck_utils.get_month_start()
+        if not end:
+            end = ck_utils.get_next_month()
+
+        fm = self.frame_model
+        session = db.get_session()
+        bandwidth_in = sqlalchemy.func.sum(
+            sqlalchemy.case(
+                [(fm.res_type == 'network.bw.in', fm.qty)],
+                else_=0
+            )
+        )
+        bandwidth_out = sqlalchemy.func.sum(
+            sqlalchemy.case(
+                [(fm.res_type == 'network.bw.out', fm.qty)],
+                else_=0
+            )
+        )
+        q = session.query(
+            fm.begin.cast(Text).label('begin'),
+            fm.end.cast(Text).label('end'),
+            fm.tenant_id.label('tenant_id'),
+            fm.unit.label('unit'),
+            bandwidth_in.label('network.bw.in'),
+            bandwidth_out.label('network.bw.out'),
+        )
+        if tenant_id:
+            q = q.filter(
+                fm.tenant_id == tenant_id)
+        if service:
+            q = q.filter(
+                fm.res_type == service)
+        q = q.filter(
+            fm.begin >= begin,
+            fm.end <= end)
+        q = q.filter(fm.res_type.in_(['network.bw.in', 'network.bw.out']))
+        q = q.group_by(fm.begin, fm.end, fm.tenant_id, fm.unit)
+        result = [x._asdict() for x in q.all()]
+        usage = {
+            'data': result,
+            'total': {
+                'network.bw.in': Decimal(0),
+                'network.bw.out': Decimal(0),
+            }
+        }
+        for r in result:
+            usage['total']['network.bw.in'] += Decimal(r['network.bw.in'])
+            usage['total']['network.bw.out'] += Decimal(r['network.bw.out'])
+            usage['total']['unit'] = r['unit']
+        return usage
